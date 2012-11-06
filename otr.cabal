@@ -20,10 +20,16 @@ library
   -- other-modules:
   build-depends:     base
                      , bytestring
+                     , base64-bytestring
                      , arithmoi
                      , cryptocipher
                      , cryptohash
                      , crypto-api
+                     , monadcryptorandom
                      , cereal
                      , random
                      , mtl
+                     , transformers
+-- helpers
+                     , asn1-data
+                     , pem
