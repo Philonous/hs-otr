@@ -2,7 +2,9 @@
 {-# LANGUAGE NamedFieldPuns #-}
 module Otr.Types where
 
+import           Control.Monad.Error
 import           Data.Bits
+import           Crypto.Random(GenError)
 import qualified Data.ByteString as BS
 import           Data.Data
 import           Data.List
@@ -24,3 +26,10 @@ data OtrMessageHeader = OM { version      :: !OtrShort
                            , senderITag   :: !OtrInt
                            , receiverITag :: !OtrInt
                            } deriving (Show, Eq)
+data OtrError = WrongState
+              | RandomGenError GenError
+              | ProtocolFailure String -- One of the checks failed
+                deriving (Show, Eq)
+
+instance Error OtrError where
+    noMsg = WrongState -- TODO: Change
