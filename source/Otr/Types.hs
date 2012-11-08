@@ -66,8 +66,8 @@ data OtrRevealSignatureMessage = RSM { pubKey :: !OtrDsaPubKey
 
 
 data DHKeyPair = DHKeyPair { pub  :: !Integer
-                            , priv :: !Integer
-                            }
+                           , priv :: !Integer
+                           } deriving Show
 
 data OtrState = OtrState { authState        :: !Authstate
                          , ourKeyId         :: !OtrInt
@@ -77,7 +77,7 @@ data OtrState = OtrState { authState        :: !Authstate
                          , theirKeyId       :: !OtrInt
                          , theirCurrentKey  :: !(Maybe Integer)
                          , theirPreviousKey :: !(Maybe Integer)
-                         }
+                         } deriving Show
 
 data OtrError = WrongState
               | RandomGenError GenError
@@ -95,5 +95,6 @@ instance ContainsGenError OtrError where
 data Authstate = AuthstateNone
                | AuthstateAwaitingDHKey BS.ByteString
                | AuthstateAwaitingRevealsig OtrDHCommitMessage
-               | AuthstateAwaitingSig KeyDerivatives
+               | AuthstateAwaitingSig
 --               | AuthstateV1Setup  -- Compat with V1
+                 deriving Show
