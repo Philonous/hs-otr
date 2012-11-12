@@ -1,3 +1,7 @@
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE NoMonomorphismRestriction #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards #-}
 module Otr where
 
@@ -23,14 +27,22 @@ import qualified Data.Serialize as Serialize
 import           Data.Word
 import           Math.NumberTheory.Powers(powerMod)
 import           Numeric
-import           Otr.RandMonad
+import           Otr.Monad
 import           System.Random
 
 import           Otr.Types
 import           Otr.Serialize
 
 
+getState :: Monad m => OtrT g m OtrState
+getState = OtrT . lift $ get
+
+putState :: Monad m => OtrState -> OtrT g m ()
+putState = OtrT . lift . put
+
+modifyState :: Monad m => (OtrState -> OtrState) -> OtrT g m ()
 modifyState f = putState . f =<< getState
+
 
 showBits a = reverse [if testBit a i then '1' else '0' | i <- [0.. bitSize a - 1]]
 
@@ -39,21 +51,13 @@ prime = 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBE
 
 params = (prime, 2)
 
--- aes k payload = case Crypto.buildKey k :: Maybe Crypto.AES128 of
---     Nothing -> Nothing
---     Just key -> Just . fst $ Crypto.ctr' Crypto.incIV key Crypto.zeroIV payload
-
--- | Generate a129
--- random positive Integer with exactly b bits (highest bit will
--- always be 1)
--- randomBits :: RandomGen t => t -> Int -> (Integer, t)
--- randomBits g b = first (bit (b - 1) .|.) $ CRandom.randomR (0, bit $ b - 2) g
-
 mapLeft f (Left l) = Left $ f l
 mapLeft _ (Right r) = Right r
 
 -- randomIntegerBytes :: Int ->Otr Integer
-randomIntegerBytes b = rollInteger . BS.unpack <$> getBytes b
+randomIntegerBytes :: (CRandom.CryptoRandomGen g, MonadRandom g m)
+                   => Int -> m Integer
+randomIntegerBytes b = (rollInteger . BS.unpack) `liftM` getBytes b
 
 aesCtr :: BS.ByteString -> BS.ByteString -> BS.ByteString
 aesCtr k x = fst $ Crypto.ctr' Crypto.incIV key Crypto.zeroIV x
@@ -61,10 +65,11 @@ aesCtr k x = fst $ Crypto.ctr' Crypto.incIV key Crypto.zeroIV x
     key = fromMaybe (error "buildKey Failed")
                     (Crypto.buildKey k :: Maybe Crypto.AES128)
 
-sign :: CRandom.CryptoRandomGen g => BS.ByteString -> Otr g DSA.Signature
+sign :: (Monad m, CRandom.CryptoRandomGen g) =>
+     BS.ByteString -> OtrT g m DSA.Signature
 sign x = do
-   (_, privKey) <- ask
-   withRandGen $ \g -> DSA.sign g id privKey x
+   (_, privKey) <- OtrT ask
+   OtrT . withRandGen $ \g -> DSA.sign g id privKey x
 
 
 keyDerivs :: Integer -> KeyDerivatives
@@ -79,8 +84,14 @@ keyDerivs s = KD{..}
     kdM1' = h2 0x04
     kdM2' = h2 0x05
 
+putAuthstate :: Monad m => Authstate -> OtrT g m ()
 putAuthstate ns = modifyState $ \s -> s{authState = ns }
 
+putMsgstate :: Monad m => Msgstate -> OtrT g m ()
+putMsgstate ns = modifyState $ \s -> s{msgState = ns }
+
+m :: Serialize.Serialize a => Integer
+     -> Integer -> DSA.PublicKey -> a -> BS.ByteString -> BS.ByteString
 m ours theirs pubKey keyId messageAuthKey = Serialize.encode m''
   where
     m' = BSL.fromChunks [ Serialize.encode $ MPI ours
@@ -91,20 +102,26 @@ m ours theirs pubKey keyId messageAuthKey = Serialize.encode m''
     m'' =  HMAC.hmac (HMAC.MacKey messageAuthKey) m' :: SHA256.SHA256
     m   = Serialize.encode m''
 
+xs :: DSA.PublicKey
+     -> OtrInt
+     -> DSA.Signature
+     -> BS.ByteString
+     -> BS.ByteString
+     -> (BS.ByteString, BS.ByteString)
 xs pub kid sig aesKey macKey = (xEncrypted, xSha256Mac)
   where
-    x = Serialize.encode RSM { pubKey = DsaP pub
-                   , keyId = kid
-                   , sigB = DsaS sig
-                   }
+    x = Serialize.encode SD{ sdPub = DsaP pub
+                           , sdKeyId = kid
+                           , sdSig = DsaS sig
+                           }
     xEncrypted = Serialize.encode . DATA $ aesCtr aesKey x
     xSha256Mac'= HMAC.hmac' (HMAC.MacKey macKey) xEncrypted :: SHA256.SHA256
     xSha256Mac = BS.take 20 $ Serialize.encode xSha256Mac'
 
-getPrevKeyMpi :: CRandom.CryptoRandomGen g => Otr g BS.ByteString
-getPrevKeyMpi = Serialize.encode . MPI . pub . ourPreviousKey <$> get
+getPrevKeyMpi :: Monad m => OtrT g m BS.ByteString
+getPrevKeyMpi = (Serialize.encode . MPI . pub . ourPreviousKey) `liftM` OtrT get
 
-newState :: (Functor m, CRandom.CryptoRandomGen g, MonadRandom g m) => m OtrState
+newState :: (CRandom.CryptoRandomGen g, MonadRandom g m) => m OtrState
 newState = do
     x <- randomIntegerBytes 40
     let gx = powerMod 2 x prime
@@ -118,110 +135,119 @@ newState = do
                     , theirPreviousKey = Nothing
                     , theirKeyId = 0
                     , authState = AuthstateNone
+                    , msgState = MsgstatePlaintext
                     }
 
+protocolGuard e p = unless p . throwError $ ProtocolError e
+
 -- -- -- bob1
-bob1 :: CRandom.CryptoRandomGen g => Otr g OtrDHCommitMessage
+
+bob1 :: (Monad m, CRandom.CryptoRandomGen g) =>
+     OtrT g m OtrDHCommitMessage
 bob1 = do
     r <- getBytes 16
     let aesKey = fromMaybe (error "buildKey Failed")
                         (Crypto.buildKey r :: Maybe Crypto.AES128)
 
     gxMpi <- getPrevKeyMpi
-    let gxMpiAes = fst $ Crypto.ctr' Crypto.incIV aesKey Crypto.zeroIV gxMpi
-    let gxMpiSha256 = SHA256.hash gxMpi
+    let gxMpiAes = DATA . fst $ Crypto.ctr' Crypto.incIV aesKey Crypto.zeroIV gxMpi
+    let gxMpiSha256 = DATA . SHA256.hash $ gxMpi
     putAuthstate $ AuthstateAwaitingDHKey r
     return DHC{..}
 
+
 -- -- alice1
-alice1 :: CRandom.CryptoRandomGen g
-          => OtrDHCommitMessage
-          -> Otr g OtrDHKeyMessage
+alice1 :: (Monad m, Functor m) => OtrDHCommitMessage -> OtrT g m OtrDHKeyMessage
 alice1 otrcm = do
-    aState <- authState <$> get
+    aState <- authState <$> getState
     case aState of
         AuthstateNone -> return ()
-        _             -> throwError WrongState
+        _             -> OtrT $ throwError WrongState
     putAuthstate $ AuthstateAwaitingRevealsig otrcm
     DHK <$> getPrevKeyMpi
 
--- -- -- bob2
--- bob2 :: BS.ByteString
---      -> OtrInt
---      -> Otr (BS.ByteString, BS.ByteString, BS.ByteString)
-bob2 gyMpi = do
-    aState <- gets authState
+bob2 :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
+     OtrDHKeyMessage -> OtrT g m OtrRevealSignatureMessage
+bob2 (DHK gyMpi) = do
+    aState <- authState <$> getState
     r <- case aState of
         AuthstateAwaitingDHKey r -> return r
         _ -> throwError WrongState
     checkAndSaveDHKey gyMpi
-    (xbEncrypted, xbSha256Mac) <- mkAuthMessage
+    sm <- mkAuthMessage
     putAuthstate $ AuthstateAwaitingSig
-    return $! (r, xbEncrypted, xbSha256Mac)
+    return $! (RSM (DATA r) sm)
 
-alice2 (r, xbEncrypted, xbSha256Mac) = do
-    aState <- gets authState
+alice2 :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
+     OtrRevealSignatureMessage -> OtrT g m OtrSignatureMessage
+alice2 (RSM r sm) = do
+    aState <- authState <$> getState
     DHC{..} <- case aState of
         AuthstateAwaitingRevealsig dhc -> return dhc
         _ -> throwError WrongState
-    let gxMpi = aesCtr r gxMpiAes -- decrypt
-    guard (SHA256.hash gxMpi == gxMpiSha256)
+    let gxMpi = aesCtr (unDATA r) (unDATA gxMpiAes) -- decrypt
+    protocolGuard HashMismatch (SHA256.hash gxMpi == unDATA gxMpiSha256)
     checkAndSaveDHKey gxMpi
-    checkAndSaveAuthMessage (xbEncrypted, xbSha256Mac)
+    checkAndSaveAuthMessage sm
     am <- mkAuthMessage
     putAuthstate $ AuthstateNone
+    return am
 
-bob3 (r, xaEncrypted, xaSha256Mac) = do
-    aState <- gets authState
-
-    -- KD{..} <- case aState of
-    --     AuthstateAwaitingSig kd -> return kd
-    --     _ -> throwError $ WrongState
+bob3 :: Monad m => OtrSignatureMessage -> OtrT g m ()
+bob3 (SM xaEncrypted xaSha256Mac) = do
+    aState <- OtrT $ gets authState
     case aState of
         AuthstateAwaitingSig -> return ()
         _ -> throwError $ WrongState
-    checkAndSaveAuthMessage (xaEncrypted, xaSha256Mac)
+    checkAndSaveAuthMessage (SM xaEncrypted xaSha256Mac)
+    putAuthstate $ AuthstateNone
     return ()
 
+checkAndSaveDHKey :: Monad m => BS.ByteString -> OtrT g m ()
 checkAndSaveDHKey keyMpi = do
     MPI key <- case Serialize.decode keyMpi of
-                   Left e -> throwError $
-                               ProtocolFailure "Couldn't deserialize gy"
+                   Left e -> OtrT . throwError $ ProtocolError DeserializationError
                    Right r -> return r
-    guard (2 <= key && key <= prime - 2)
-    modify (\s -> s{theirCurrentKey = Just key})
+    protocolGuard KeyRange (2 <= key && key <= prime - 2)
+    OtrT $ modify (\s -> s{theirCurrentKey = Just key})
 
-checkAndSaveAuthMessage (xEncrypted, xSha256Mac) = do
-    DHKeyPair gx x <- gets ourPreviousKey
-    Just gy <- gets theirCurrentKey
-    (ourPub, _) <- ask
+checkAndSaveAuthMessage :: Monad m => OtrSignatureMessage -> OtrT g m ()
+checkAndSaveAuthMessage (SM (DATA xEncrypted) (DATA xSha256Mac)) = do
+    DHKeyPair gx x <- OtrT $ gets ourPreviousKey
+    Just gy <- OtrT $ gets theirCurrentKey
+    (ourPub, _) <- OtrT ask
 --    Just gy <- gets theirCurrentKey
     let s = powerMod gy x prime
     let KD{..} = keyDerivs s
     let xSha256Mac' = HMAC.hmac' (HMAC.MacKey kdM2) xEncrypted :: SHA256.SHA256
-    guard (Serialize.encode xSha256Mac' == xSha256Mac)
-    let (Right (RSM (DsaP theirPub) theirKeyId (DsaS sig))) =
+    protocolGuard MACFailure (Serialize.encode xSha256Mac' == xSha256Mac)
+    let (Right (SD (DsaP theirPub) theirKeyId (DsaS sig))) =
                 Serialize.decode $ aesCtr kdC xEncrypted
     let theirM = m gy gx theirPub theirKeyId kdM1
     -- check that the public key they present is the one we have stored (if any)
-    maybe (return ()) (guard . (== theirPub)) =<< gets theirPublicKey
-    guard (DSA.verify sig id theirPub theirM == Right True)
-    modify $ \s -> s{ theirKeyId = theirKeyId
-                    , theirPublicKey = Just theirPub
-                    }
+    storedPubkey <- OtrT $ gets theirPublicKey
+    case storedPubkey of
+        Nothing -> return ()
+        Just sp -> protocolGuard PubkeyMismatch (sp == theirPub)
+    protocolGuard SignatureError
+                  (DSA.verify sig id theirPub theirM == Right True)
+    OtrT . modify $ \s -> s{ theirKeyId = theirKeyId
+                           , theirPublicKey = Just theirPub
+                           }
 
-mkAuthMessage :: CRandom.CryptoRandomGen g => Otr g (BS.ByteString, BS.ByteString)
+mkAuthMessage :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
+     OtrT g m OtrSignatureMessage
 mkAuthMessage = do
-    DHKeyPair gx x <- gets ourPreviousKey
-    Just gy <- gets theirCurrentKey
+    DHKeyPair gx x <- ourPreviousKey <$> getState
+    Just gy <- theirCurrentKey <$> getState
     let s = powerMod gy x prime
     let kd@KD{..} = keyDerivs s
-    (ourPub, _) <- ask
-    keyId <- gets ourKeyId
+    (ourPub, _) <- OtrT ask
+    keyId <- OtrT $ gets ourKeyId
     let mb = m gx gy ourPub keyId kdM1
     sig <- sign mb
     let (xbEncrypted, xbSha256Mac) = xs ourPub keyId sig kdC kdM2
-    return (xbEncrypted, xbSha256Mac)
+    return $ SM (DATA xbEncrypted) (DATA xbSha256Mac)
 
 -- checkX xEncrypted xSha256 pubB = do
 --     let xaSha256Mac' = HMAC.hmac' (HMAC.MacKey kdM2) xbEncrypted :: SHA256.SHA256

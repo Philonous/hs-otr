@@ -88,17 +88,20 @@ instance Serialize OtrDsaSignature where
     get = getDsaS
 
 
-putRevealMessage RSM{..} = do
-    put pubKey
-    put keyId
-    put sigB
-
-getRevealMessage = do
-    pubKey <- get
-    keyId  <- get
-    sigB   <- get
-    return RSM{..}
+putRevealMessage (RSM r sm) = put r >> put sm
+getRevealMessage = liftM2 RSM get get
 
 instance Serialize OtrRevealSignatureMessage where
     put = putRevealMessage
     get = getRevealMessage
+
+instance Serialize OtrSignatureMessage where
+    put (SM enc mc) = put enc >> put mc
+    get = liftM2 SM get get
+
+instance Serialize SignatureData where
+    put (SD p k s) = do
+        put p
+        put k
+        put s
+    get = liftM3 SD get get get

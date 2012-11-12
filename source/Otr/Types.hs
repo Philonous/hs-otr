@@ -32,8 +32,8 @@ data OtrMessageHeader = OM { version      :: !OtrShort
 
 
 
-data OtrDHCommitMessage = DHC{ gxMpiAes    :: !BS.ByteString
-                             , gxMpiSha256 :: !BS.ByteString
+data OtrDHCommitMessage = DHC{ gxMpiAes    :: !DATA
+                             , gxMpiSha256 :: !DATA
                              } deriving Show
 
 data OtrDHKeyMessage = DHK {gyMpi :: !BS.ByteString }
@@ -59,17 +59,27 @@ newtype OtrDsaPubKey = DsaP {unDsaP:: DSA.PublicKey }
 
 newtype OtrDsaSignature = DsaS DSA.Signature
 
-data OtrRevealSignatureMessage = RSM { pubKey :: !OtrDsaPubKey
-                                     , keyId  :: !OtrInt
-                                     , sigB   :: !OtrDsaSignature
+data OtrRevealSignatureMessage = RSM { revealedKey :: !DATA
+                                     , rsmSig :: !OtrSignatureMessage
                                      }
+
+data SignatureData = SD { sdPub   :: OtrDsaPubKey
+                        , sdKeyId :: OtrInt
+                        , sdSig   :: OtrDsaSignature
+                        }
 
 
 data DHKeyPair = DHKeyPair { pub  :: !Integer
                            , priv :: !Integer
                            } deriving Show
 
+data Msgstate = MsgstatePlaintext
+              | MsgstateEncrypted
+              | MsgstateFinished
+              deriving (Eq, Show)
+
 data OtrState = OtrState { authState        :: !Authstate
+                         , msgState         :: !Msgstate
                          , ourKeyId         :: !OtrInt
                          , theirPublicKey   :: !(Maybe DSA.PublicKey) -- DSA
                          , ourCurrentKey    :: !DHKeyPair
@@ -81,8 +91,17 @@ data OtrState = OtrState { authState        :: !Authstate
 
 data OtrError = WrongState
               | RandomGenError GenError
-              | ProtocolFailure String -- One of the checks failed
+              | ProtocolError ProtocolError -- One of the checks failed
                 deriving (Show, Eq)
+
+data ProtocolError = MACFailure
+                   | KeyRange -- DH key outside [2, prime - 2]
+                   | PubkeyMismatch -- Offered DSA pubkey doesn't match the one
+                                    -- we have
+                   | SignatureError
+                   | HashMismatch
+                   | DeserializationError -- couldn deserialize data structure
+                     deriving (Show, Eq)
 
 instance Error OtrError where
     noMsg = WrongState -- TODO: Change
@@ -98,3 +117,17 @@ data Authstate = AuthstateNone
                | AuthstateAwaitingSig
 --               | AuthstateV1Setup  -- Compat with V1
                  deriving Show
+
+data OtrSignatureMessage = SM { encryptedSignature :: !DATA
+                              , macdSignature :: !DATA
+                              }
+
+data OtrMessage = DHCommitMessage !OtrDHCommitMessage
+                | DHKeyMessage !OtrDHKeyMessage
+                | RevealSignatureMessage !OtrRevealSignatureMessage
+                | SignatureMessage !OtrSignatureMessage
+
+showMessageType (DHCommitMessage        _) = "DHCommitMessage"
+showMessageType (DHKeyMessage           _) = "DHKeyMessage"
+showMessageType (RevealSignatureMessage _) = "RevealSignatureMessage"
+showMessageType (SignatureMessage       _) = "SignatureMessage"
