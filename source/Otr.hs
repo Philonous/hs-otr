@@ -30,34 +30,6 @@ import           Otr.Types
 import           Otr.Serialize
 
 
-type Otr g a = ReaderT (DSA.PublicKey, DSA.PrivateKey)
-                 (StateT OtrState
-                   (RandT g
-                     (ErrorT OtrError
-                       Identity)))
-                 a
-
-runOtr :: (DSA.PublicKey, DSA.PrivateKey)
-       -> OtrState
-       -> Otr g a
-       -> g
-       -> (Either OtrError ((a , OtrState) , g))
-runOtr dsaKeys s m g = runIdentity
-                       . runErrorT
-                       . runRandT g
-                       . flip runStateT s
-                       . flip runReaderT dsaKeys
-                       $ m
-
-getState :: CRandom.CryptoRandomGen g => Otr g OtrState
-getState = lift $ get
-
-putState :: CRandom.CryptoRandomGen g => OtrState -> Otr g ()
-putState = lift . put
-
-modifyState :: CRandom.CryptoRandomGen g
-            => (OtrState -> OtrState)
-            -> Otr g ()
 modifyState f = putState . f =<< getState
 
 showBits a = reverse [if testBit a i then '1' else '0' | i <- [0.. bitSize a - 1]]
