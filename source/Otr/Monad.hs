@@ -15,7 +15,7 @@ import           Control.Monad.Identity
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import           Control.Monad.Trans.State.Strict (liftCatch)
-import qualified Crypto.Cipher.DSA as DSA
+import qualified Crypto.PubKey.DSA as DSA
 import qualified Crypto.Random as CRandom
 import qualified Data.ByteString as BS
 import           Otr.Types
@@ -84,3 +84,6 @@ runOtrT dsaKeys s m g =  runErrorT
 instance Monad m => MonadError OtrError (OtrT g m) where
     throwError = OtrT . throwError
     catchError (OtrT m) f = OtrT . catchError m $ unOtrT . f
+
+instance MonadIO m => MonadIO (OtrT g m) where
+    liftIO = lift . liftIO

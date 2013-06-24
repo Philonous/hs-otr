@@ -5,7 +5,7 @@ module Otr.Types where
 import           Control.Monad.CryptoRandom
 import           Control.Monad.Error
 import           Control.Monad.State
-import qualified Crypto.Cipher.DSA as DSA
+import qualified Crypto.PubKey.DSA as DSA
 import           Crypto.Random(GenError)
 import           Data.Bits
 import qualified Data.ByteString as BS
@@ -34,9 +34,9 @@ data OtrMessageHeader = OM { version      :: !OtrShort
 
 data OtrDHCommitMessage = DHC{ gxMpiAes    :: !DATA
                              , gxMpiSha256 :: !DATA
-                             } deriving Show
+                             } deriving (Show, Eq)
 
-data OtrDHKeyMessage = DHK {gyMpi :: !BS.ByteString }
+data OtrDHKeyMessage = DHK {gyMpi :: !BS.ByteString } deriving (Show, Eq)
 
 data OTRSession = OTRS { instanceTag :: !Word32
                        , aesKey      :: !(Maybe BS.ByteString)
@@ -51,22 +51,22 @@ data KeyDerivatives = KD { kdSsid
                          , kdM2
                          , kdM1'
                          , kdM2'
-                           :: BS.ByteString
+                           :: !BS.ByteString
                          }
                        deriving (Eq, Show)
 
-newtype OtrDsaPubKey = DsaP {unDsaP:: DSA.PublicKey }
+newtype OtrDsaPubKey = DsaP {unDsaP:: DSA.PublicKey } deriving (Eq, Show)
 
-newtype OtrDsaSignature = DsaS DSA.Signature
+newtype OtrDsaSignature = DsaS DSA.Signature deriving (Eq, Show)
 
 data OtrRevealSignatureMessage = RSM { revealedKey :: !DATA
                                      , rsmSig :: !OtrSignatureMessage
-                                     }
+                                     } deriving (Eq, Show)
 
 data SignatureData = SD { sdPub   :: OtrDsaPubKey
                         , sdKeyId :: OtrInt
                         , sdSig   :: OtrDsaSignature
-                        }
+                        } deriving (Eq, Show)
 
 
 data DHKeyPair = DHKeyPair { pub  :: !Integer
@@ -98,18 +98,14 @@ data ProtocolError = MACFailure
                    | KeyRange -- DH key outside [2, prime - 2]
                    | PubkeyMismatch -- Offered DSA pubkey doesn't match the one
                                     -- we have
-                   | SignatureError
+                   | SignatureMismatch
                    | HashMismatch
                    | DeserializationError -- couldn deserialize data structure
+                   | UnexpectedMessagetype
                      deriving (Show, Eq)
 
 instance Error OtrError where
     noMsg = WrongState -- TODO: Change
-
-instance ContainsGenError OtrError where
-    toGenError (RandomGenError e) = Just e
-    toGenError _ = Nothing
-    fromGenError = RandomGenError
 
 data Authstate = AuthstateNone
                | AuthstateAwaitingDHKey BS.ByteString
@@ -120,7 +116,7 @@ data Authstate = AuthstateNone
 
 data OtrSignatureMessage = SM { encryptedSignature :: !DATA
                               , macdSignature :: !DATA
-                              }
+                              } deriving (Eq, Show)
 
 data OtrMessage = DHCommitMessage !OtrDHCommitMessage
                 | DHKeyMessage !OtrDHKeyMessage

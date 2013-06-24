@@ -3,7 +3,7 @@ module Otr.Serialize where
 
 import           Control.Applicative((<$>))
 import           Control.Monad
-import qualified Crypto.Cipher.DSA as DSA
+import qualified Crypto.PubKey.DSA as DSA
 import           Data.Bits
 import qualified Data.ByteString as BS
 import           Data.List
@@ -61,15 +61,15 @@ instance Serialize DATA where
     get = DATA <$> (getByteString . fromIntegral =<< getWord32be)
 
 instance Serialize OtrDsaPubKey where
-    put (DsaP (DSA.PublicKey (p,g,q) y)) = putWord16be 0
+    put (DsaP (DSA.PublicKey (DSA.Params p g q) y)) = putWord16be 0
                    >> mapM_ (put . MPI) [p, q, g, y]
                    >> return ()
     get = do
         guard . (== 0) =<< getWord16be
         [p, q, g, y] <- replicateM 4 $ unMPI <$> get
-        return (DsaP (DSA.PublicKey (p,g,q) y))
+        return (DsaP (DSA.PublicKey (DSA.Params p g q) y))
 
-putDsaS (DsaS (r, s)) = do
+putDsaS (DsaS (DSA.Signature r s)) = do
     let r' = unrollInteger r
     let s' = unrollInteger s
     -- unless (length r' == 20 && length s' == 20)
@@ -81,7 +81,7 @@ putDsaS (DsaS (r, s)) = do
 getDsaS = do
     r <- replicateM 20 getWord8
     s <- replicateM 20 getWord8
-    return $ DsaS (rollInteger r, rollInteger s)
+    return . DsaS $ DSA.Signature (rollInteger r) (rollInteger s)
 
 instance Serialize OtrDsaSignature where
     put = putDsaS

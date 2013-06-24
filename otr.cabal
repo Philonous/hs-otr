@@ -22,8 +22,11 @@ library
                      , bytestring
                      , base64-bytestring
                      , arithmoi
-                     , cryptocipher
+--                     , cryptocipher
+                     , crypto-pubkey
                      , cryptohash
+                     , cryptohash-cryptoapi
+                     , cipher-aes128
                      , crypto-api
                      , monadcryptorandom
                      , cereal
@@ -33,3 +36,5 @@ library
 -- helpers
                      , asn1-data
                      , pem
+                     , certificate
+                     , monad-coroutine
