@@ -10,31 +10,24 @@ module Otr where
 import           Control.Applicative ((<$>))
 import           Control.Monad
 import           Control.Monad.Error
-import           Control.Monad.Identity
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import qualified Crypto.Cipher.AES128 as AES
-import qualified Crypto.PubKey.DH as DH
-import qualified Crypto.PubKey.DSA as DSA
 import qualified Crypto.Classes as Crypto
 import qualified Crypto.HMAC as HMAC
-import qualified Crypto.Hash.SHA256 as SHA256 (hash)
 import qualified Crypto.Hash.CryptoAPI as Crypto
+import qualified Crypto.Hash.SHA256 as SHA256 (hash)
 import qualified Crypto.Modes as Crypto (zeroIV)
+import qualified Crypto.PubKey.DSA as DSA
 import qualified Crypto.Random as CRandom
-import           Data.Bits
+import           Data.Bits hiding (shift)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
-import           Data.Maybe(fromMaybe)
 import qualified Data.Serialize as Serialize
-import           Data.Word
 import           Math.NumberTheory.Powers(powerMod)
-import           Numeric
-import           Otr.Monad
-import           System.Random
 
+import           Otr.Monad
 import           Otr.Types
-import           Otr.Serialize
 
 getState :: Monad m => OtrT g m OtrState
 getState = OtrT . lift $ get
@@ -46,13 +39,16 @@ modifyState :: Monad m => (OtrState -> OtrState) -> OtrT g m ()
 modifyState f = putState . f =<< getState
 
 
+showBits :: Bits a => a -> [Char]
 showBits a = reverse [if testBit a i then '1' else '0' | i <- [0.. bitSize a - 1]]
 
 prime :: Integer
 prime = 0xFFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA237327FFFFFFFFFFFFFFFF
 
+params :: Num t => (Integer, t)
 params = (prime, 2)
 
+mapLeft :: (t -> a) -> Either t b -> Either a b
 mapLeft f (Left l) = Left $ f l
 mapLeft _ (Right r) = Right r
 
@@ -66,14 +62,11 @@ aesCtr k x = fst $ Crypto.ctr key Crypto.zeroIV x
   where
     key = case Crypto.buildKey k :: Maybe AES.AESKey of
         Nothing -> error "Could not produce key"
-        Just k -> k
+        Just k' -> k'
 
--- sign :: (Monad m, CRandom.CryptoRandomGen g) =>
---      BS.ByteString -> OtrT g m DSA.Signature
 sign !x = do
    (_, privKey) <- OtrT ask
-   r <- OtrT . withRandGen $ \g -> case DSA.sign g privKey id x of
-       (r, g) -> Right (r, g)
+   r <- OtrT . withRandGen $ \g -> Right $ DSA.sign g privKey id x
    return r
 
 
@@ -105,7 +98,6 @@ m ours theirs pubKey keyId messageAuthKey = Serialize.encode m''
                         , Serialize.encode keyId
                         ]
     m'' =  HMAC.hmac (HMAC.MacKey messageAuthKey) m' :: Crypto.SHA256
-    m   = Serialize.encode m''
 
 xs :: DSA.PublicKey
      -> OtrInt
@@ -148,10 +140,9 @@ newState = do
 protocolGuard :: MonadError OtrError m => ProtocolError -> Bool -> m ()
 protocolGuard e p = unless p . throwError $ ProtocolError e
 
--- -- -- bob1
-
--- bob1 :: (Monad m, CRandom.CryptoRandomGen g) =>
---      OtrT g m OtrDHCommitMessage
+bob1
+  :: (Monad m, CRandom.CryptoRandomGen g) =>
+     OtrT g m OtrDHCommitMessage
 bob1 = do
     r <- getBytes 16
     gx <- OtrT . gets $ pub . ourPreviousKey
@@ -161,9 +152,9 @@ bob1 = do
     putAuthstate $ AuthstateAwaitingDHKey r
     return DHC{..}
 
-
--- -- alice1
--- alice1 :: (Monad m, Functor m) => OtrDHCommitMessage -> OtrT g m OtrDHKeyMessage
+alice1
+  :: (Monad m, Functor m) =>
+     OtrDHCommitMessage -> OtrT g m OtrDHKeyMessage
 alice1 otrcm = do
     aState <- authState <$> getState
     case aState of
@@ -174,8 +165,7 @@ alice1 otrcm = do
     let gyMpi = Serialize.encode $ MPI gy
     return $ DHK gyMpi
 
--- bob2 :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
---      OtrDHKeyMessage -> OtrT g m OtrRevealSignatureMessage
+
 bob2 (DHK gyMpi) = do
     aState <- authState <$> getState
     r <- case aState of
@@ -212,9 +202,10 @@ bob3 (SM xaEncrypted xaSha256Mac) = do
     return ()
 
 -- checkAndSaveDHKey :: Monad m => BS.ByteString -> OtrT g m ()
+checkAndSaveDHKey :: Monad m => BS.ByteString -> OtrT g m ()
 checkAndSaveDHKey keyMpi = do
     MPI key <- case Serialize.decode keyMpi of
-                   Left e -> OtrT . throwError $ ProtocolError DeserializationError
+                   Left _e -> OtrT . throwError $ ProtocolError DeserializationError
                    Right r -> return r
     protocolGuard KeyRange (2 <= key && key <= prime - 2)
     OtrT $ modify (\s -> s{theirCurrentKey = Just key})
@@ -231,7 +222,6 @@ checkAndSaveAuthMessage (SM (DATA xEncrypted) (DATA xSha256Mac)) = do
     let (Right (SD (DsaP theirPub) theirKeyId (DsaS sig))) =
                 Serialize.decode $ aesCtr kdC xEncrypted
     let theirM = m gy gx theirPub theirKeyId kdM1
-    liftIO . print $ theirM
     -- check that the public key they present is the one we have stored (if any)
     storedPubkey <- OtrT $ gets theirPublicKey
     case storedPubkey of
@@ -239,7 +229,7 @@ checkAndSaveAuthMessage (SM (DATA xEncrypted) (DATA xSha256Mac)) = do
         Just sp -> protocolGuard PubkeyMismatch (sp == theirPub)
     protocolGuard SignatureMismatch
                   (DSA.verify id  theirPub sig theirM == True)
-    OtrT . modify $ \s -> s{ theirKeyId = theirKeyId
+    OtrT . modify $ \s' -> s'{ theirKeyId = theirKeyId
                            , theirPublicKey = Just theirPub
                            }
 
@@ -249,15 +239,16 @@ mkAuthMessage = do
     DHKeyPair gx x <- ourPreviousKey <$> getState
     Just gy <- theirCurrentKey <$> getState
     let s = powerMod gy x prime
-    let kd@KD{..} = keyDerivs s
+    let KD{..} = keyDerivs s
     (ourPub, _) <- OtrT ask
     keyId <- OtrT $ gets ourKeyId
     let mb = m gx gy ourPub keyId kdM1
-    liftIO $ putStr "mk: "
-    liftIO . print $ mb
     sig <- sign mb
     let (xbEncrypted, xbSha256Mac) = xs ourPub keyId sig kdC kdM2
     return $ SM xbEncrypted xbSha256Mac
+
+
+
 
 -- checkX xEncrypted xSha256 pubB = do
 --     let xaSha256Mac' = HMAC.hmac' (HMAC.MacKey kdM2) xbEncrypted :: Crypto.SHA256

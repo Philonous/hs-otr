@@ -16,8 +16,9 @@ cabal-version:       >=1.8
 
 library
   exposed-modules:     Otr
+  other-modules:       Otr.Monad
+                     , Otr.Types
   hs-source-dirs:      source
-  -- other-modules:
   build-depends:     base
                      , bytestring
                      , base64-bytestring
@@ -38,3 +39,4 @@ library
                      , pem
                      , certificate
                      , monad-coroutine
+  ghc-options: -Wall

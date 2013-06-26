@@ -9,7 +9,6 @@
 {-# LANGUAGE NoMonomorphismRestriction #-}
 module Otr.Monad where
 
-import           Control.Monad
 import           Control.Monad.Error
 import           Control.Monad.Identity
 import           Control.Monad.Reader
@@ -28,6 +27,7 @@ runRandT g m = runStateT (unRandT m) g
 
 type Rand g = RandT g Identity
 
+runRand :: g -> RandT g Identity a -> (a, g)
 runRand g = runIdentity . runRandT g
 
 class Monad m => MonadRandom g m | m -> g where
