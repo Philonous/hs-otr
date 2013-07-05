@@ -29,9 +29,12 @@ newtype DATA = DATA {unDATA :: BS.ByteString} deriving Eq
 
 instance Show DATA where
     show (DATA d) = "DATA{ " ++ show (BS.length d) ++ " Bytes hex:\""
-                    ++ showHexData ++ "\"}"
-      where
-        showHexData = concatMap (flip showHex "") $ BS.unpack d
+                    ++ showHexData d ++ "\"}"
+
+showHexData :: BS.ByteString -> String
+showHexData d = concatMap (\x -> let hex = showHex x "" in
+                          replicate (2 - length hex) '0' ++ hex )
+                        $ BS.unpack d
 
 
 data OtrMessage = OM { version      :: !OtrShort
@@ -248,9 +251,11 @@ putDsaS :: OtrDsaSignature -> PutM ()
 putDsaS (DsaS (DSA.Signature r s)) = do
     let r' = unrollInteger r
     let s' = unrollInteger s
-    unless (length r' == 20 && length s' == 20)
-        $ fail "Signature components not 20 bytes"
+    unless (length r' > 20 && length s' > 20)
+        $ fail "Signature components more than 20 bytes"
+    replicateM (20 - length r') $ putWord8 0
     mapM_ putWord8 r'
+    replicateM (20 - length s') $ putWord8 0
     mapM_ putWord8 s'
 
 

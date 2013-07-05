@@ -107,7 +107,6 @@ waitForOtr sess keys = forever $ do
 
 main = do
     updateGlobalLogger "Pontarius.Xmpp" $ setLevel DEBUG
-    let ins = 13305
     let keyFile = "../privkey.pem"
     Right ((PEM pName _ bs) : _) <- pemParseBS `fmap` (BS.readFile keyFile)
     let Right keysASN1 = decodeASN1 DER (BSL.fromChunks [bs])

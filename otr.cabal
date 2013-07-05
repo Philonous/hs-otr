@@ -28,7 +28,7 @@ library
                      , crypto-pubkey
                      , cryptohash
                      , cryptohash-cryptoapi
-                     , cipher-aes128
+                     , cipher-aes
                      , crypto-api
                      , monadcryptorandom
                      , cereal

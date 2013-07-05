@@ -15,7 +15,7 @@ import           Control.Monad
 import           Control.Monad.Error
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
-import qualified Crypto.Cipher.AES128 as AES
+import qualified Crypto.Cipher.AES as AES
 import qualified Crypto.Classes as Crypto
 import qualified Crypto.HMAC as HMAC
 import qualified Crypto.Hash.CryptoAPI as Crypto
@@ -61,11 +61,10 @@ randomIntegerBytes :: (CRandom.CPRG g, MonadRandom g m)
 randomIntegerBytes b = (rollInteger . BS.unpack) `liftM` getBytes b
 
 aesCtr :: BS.ByteString -> BS.ByteString -> BS.ByteString
-aesCtr k x = fst $ Crypto.ctr key Crypto.zeroIV x
+aesCtr k x = AES.decryptCTR key zeroIV x
   where
-    key = case Crypto.buildKey k :: Maybe AES.AESKey of
-        Nothing -> error "Could not produce key"
-        Just k' -> k'
+    key = AES.initKey k
+    zeroIV = AES.IV . BS.pack $ replicate 16 0
 
 sign !x = do
    (_, privKey) <- OtrT ask
