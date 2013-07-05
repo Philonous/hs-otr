@@ -3,16 +3,19 @@
 {-# LANGUAGE NamedFieldPuns #-}
 module Otr.Types where
 
-import           Control.Applicative((<$>))
+import           Control.Applicative((<$>), (<*>))
+import           Control.Exception
 import           Control.Monad
-import           Control.Monad.CryptoRandom
+import qualified Control.Monad.CryptoRandom as CR
 import           Control.Monad.Error
 import qualified Crypto.PubKey.DSA as DSA
 import           Data.Bits
 import qualified Data.ByteString as BS
 import           Data.List
 import           Data.Serialize
+import           Data.Typeable
 import           Data.Word
+import           Numeric
 
 -- all big endian
 type OtrByte = Word8
@@ -22,21 +25,38 @@ type OtrInt = Word32
 -- multi-precision unsigned integer
 newtype MPI = MPI{unMPI :: Integer} deriving (Show, Eq)
 
-newtype DATA = DATA {unDATA :: BS.ByteString} deriving (Show, Eq)
+newtype DATA = DATA {unDATA :: BS.ByteString} deriving Eq
 
-data OtrMessageHeader = OM { version      :: !OtrShort
-                           , messageType  :: !OtrByte
-                           , senderITag   :: !OtrInt
-                           , receiverITag :: !OtrInt
-                           } deriving (Show, Eq)
+instance Show DATA where
+    show (DATA d) = "DATA{ " ++ show (BS.length d) ++ " Bytes hex:\""
+                    ++ showHexData ++ "\"}"
+      where
+        showHexData = concatMap (flip showHex "") $ BS.unpack d
 
 
+data OtrMessage = OM { version      :: !OtrShort
+                     , senderITag   :: !OtrInt
+                     , receiverITag :: !OtrInt
+                     , messageBody  :: !OtrMessageBody
+                     } deriving (Show, Eq)
 
 data OtrDHCommitMessage = DHC{ gxMpiAes    :: !DATA
                              , gxMpiSha256 :: !DATA
                              } deriving (Show, Eq)
 
-data OtrDHKeyMessage = DHK {gyMpi :: !BS.ByteString } deriving (Show, Eq)
+instance Serialize OtrDHCommitMessage where
+    put DHC{..} = do
+        put gxMpiAes
+        put gxMpiSha256
+    get =
+        DHC <$> get <*> get
+
+
+data OtrDHKeyMessage = DHK {gyMpi :: !MPI } deriving (Show, Eq)
+
+instance Serialize OtrDHKeyMessage where
+    put DHK{..} = put gyMpi
+    get = DHK <$> get
 
 data OTRSession = OTRS { instanceTag :: !Word32
                        , aesKey      :: !(Maybe BS.ByteString)
@@ -87,12 +107,22 @@ data OtrState = OtrState { authState        :: !Authstate
                          , theirKeyId       :: !OtrInt
                          , theirCurrentKey  :: !(Maybe Integer)
                          , theirPreviousKey :: !(Maybe Integer)
+                           -- Instance Tags
+                         , theirIT          :: !OtrInt -- 0 is considered a
+                                                       -- special value meaning
+                                                       -- no instance Tag has
+                                                       -- been received yet
+                         , ourIT            :: !OtrInt
                          } deriving Show
 
 data OtrError = WrongState
-              | RandomGenError GenError
+              | RandomGenError CR.GenError
+              | InstanceTagRange
               | ProtocolError ProtocolError -- One of the checks failed
-                deriving (Show, Eq)
+                deriving (Show, Eq, Typeable)
+
+instance Exception OtrError
+
 
 data ProtocolError = MACFailure
                    | KeyRange -- DH key outside [2, prime - 2]
@@ -100,7 +130,8 @@ data ProtocolError = MACFailure
                                     -- we have
                    | SignatureMismatch
                    | HashMismatch
-                   | DeserializationError -- couldn deserialize data structure
+                   | DeserializationError String -- couldn deserialize data
+                                                 -- structure
                    | UnexpectedMessagetype
                      deriving (Show, Eq)
 
@@ -114,40 +145,63 @@ data Authstate = AuthstateNone
 --               | AuthstateV1Setup  -- Compat with V1
                  deriving Show
 
+newtype MAC = MAC BS.ByteString deriving (Eq, Show) -- 20 bytes of MAC data
+
+instance Serialize MAC where
+    get = MAC <$> getBytes 20
+    put (MAC bs) = putByteString bs
+
 data OtrSignatureMessage = SM { encryptedSignature :: !DATA
-                              , macdSignature :: !DATA
+                              , macdSignature :: !MAC
                               } deriving (Eq, Show)
 
-data OtrMessage = DHCommitMessage !OtrDHCommitMessage
-                | DHKeyMessage !OtrDHKeyMessage
-                | RevealSignatureMessage !OtrRevealSignatureMessage
-                | SignatureMessage !OtrSignatureMessage
+data OtrMessageBody = DHCommitMessage !OtrDHCommitMessage
+                    | DHKeyMessage !OtrDHKeyMessage
+                    | RevealSignatureMessage !OtrRevealSignatureMessage
+                    | SignatureMessage !OtrSignatureMessage
+                    | DataMessage ()
+                      deriving (Eq, Show)
 
-showMessageType :: OtrMessage -> [Char]
+showMessageType :: OtrMessageBody -> [Char]
 showMessageType (DHCommitMessage        _) = "DHCommitMessage"
 showMessageType (DHKeyMessage           _) = "DHKeyMessage"
 showMessageType (RevealSignatureMessage _) = "RevealSignatureMessage"
 showMessageType (SignatureMessage       _) = "SignatureMessage"
+showMessageType (DataMessage            _) = "DataMessage"
 
 
-putMessageHeader :: OtrMessageHeader -> PutM ()
-putMessageHeader OM{..} = do
+putMessage :: OtrMessage -> PutM ()
+putMessage OM{..} = do
+    let (tp, putBody) = case messageBody of
+            DHCommitMessage b        -> (0x02, put b)
+            DHKeyMessage b           -> (0x0a, put b)
+            RevealSignatureMessage b -> (0x11, put b)
+            SignatureMessage b       -> (0x12, put b)
+            DataMessage b            -> (0x03, put b)
     put version
-    put messageType
+    put (tp :: OtrByte)
     put senderITag
     put receiverITag
+    putBody
 
-getMessageHeader :: Get OtrMessageHeader
-getMessageHeader = do
+getMessage :: Get OtrMessage
+getMessage = do
     version <- get
-    messageType <- get
+    messageType <- get :: Get OtrByte
     senderITag <- get
     receiverITag <- get
+    messageBody <- case messageType of
+        0x02 -> DHCommitMessage <$> label "getDHCommitMessage" get
+        0x0a -> DHKeyMessage <$> label "getDHKeyMessage" get
+        0x11 -> RevealSignatureMessage <$> label "getRevealSignatureMessage" get
+        0x12 -> SignatureMessage <$> label "getSignatureMessage" get
+        0x03 -> DataMessage <$> label "getDataMessage" get
+        _    -> fail "unknown message type"
     return OM{..}
 
-instance Serialize OtrMessageHeader where
-    put = putMessageHeader
-    get = getMessageHeader
+instance Serialize OtrMessage where
+    put = putMessage
+    get = getMessage
 
 -- | Will be [] for x <= 0
 unrollInteger :: Integer -> [Word8]
@@ -163,7 +217,7 @@ putMPI :: MPI -> PutM ()
 putMPI (MPI i)  = do
     let bytes = unrollInteger i
     putWord32be (fromIntegral $ length bytes)
-    mapM_ put bytes
+    mapM_ putWord8 bytes
     return ()
 
 getMPI :: Get MPI
@@ -179,7 +233,7 @@ instance Serialize MPI where
 instance Serialize DATA where
     put (DATA bs) = putWord32be (fromIntegral $ BS.length bs)
                     >> putByteString bs
-    get = DATA <$> (getByteString . fromIntegral =<< getWord32be)
+    get = DATA <$> (getBytes . fromIntegral =<< getWord32be)
 
 instance Serialize OtrDsaPubKey where
     put (DsaP (DSA.PublicKey (DSA.Params p g q) y)) = putWord16be 0

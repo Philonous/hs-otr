@@ -5,9 +5,12 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE BangPatterns #-}
-module Otr where
-
+module Otr
+  ( module Otr
+  , module Otr.Types
+  ) where
 import           Control.Applicative ((<$>))
+import           Control.Concurrent.MVar
 import           Control.Monad
 import           Control.Monad.Error
 import           Control.Monad.Reader
@@ -19,7 +22,7 @@ import qualified Crypto.Hash.CryptoAPI as Crypto
 import qualified Crypto.Hash.SHA256 as SHA256 (hash)
 import qualified Crypto.Modes as Crypto (zeroIV)
 import qualified Crypto.PubKey.DSA as DSA
-import qualified Crypto.Random as CRandom
+import qualified Crypto.Random.API as CRandom
 import           Data.Bits hiding (shift)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
@@ -53,7 +56,7 @@ mapLeft f (Left l) = Left $ f l
 mapLeft _ (Right r) = Right r
 
 -- randomIntegerBytes :: Int ->Otr Integer
-randomIntegerBytes :: (CRandom.CryptoRandomGen g, MonadRandom g m)
+randomIntegerBytes :: (CRandom.CPRG g, MonadRandom g m)
                    => Int -> m Integer
 randomIntegerBytes b = (rollInteger . BS.unpack) `liftM` getBytes b
 
@@ -66,7 +69,7 @@ aesCtr k x = fst $ Crypto.ctr key Crypto.zeroIV x
 
 sign !x = do
    (_, privKey) <- OtrT ask
-   r <- OtrT . withRandGen $ \g -> Right $ DSA.sign g privKey id x
+   r <- OtrT . withRandGen $ \g -> DSA.sign g privKey id x
    return r
 
 
@@ -104,8 +107,8 @@ xs :: DSA.PublicKey
      -> DSA.Signature
      -> BS.ByteString
      -> BS.ByteString
-     -> (DATA, DATA)
-xs pub kid sig aesKey macKey = (DATA xEncrypted, DATA xSha256Mac)
+     -> (DATA, MAC)
+xs pub kid sig aesKey macKey = (DATA xEncrypted, MAC xSha256Mac)
   where
     x = Serialize.encode sd
     sd = SD{ sdPub = DsaP pub
@@ -120,19 +123,23 @@ xs pub kid sig aesKey macKey = (DATA xEncrypted, DATA xSha256Mac)
 getPrevKeyMpi :: Monad m => OtrT g m BS.ByteString
 getPrevKeyMpi = (Serialize.encode . MPI . pub . ourPreviousKey) `liftM` OtrT get
 
-newState :: (CRandom.CryptoRandomGen g, MonadRandom g m) => m OtrState
+newState :: (CRandom.CPRG g, MonadRandom g m) => m OtrState
 newState = do
     x <- randomIntegerBytes 40
     let gx = powerMod 2 x prime
     x' <- randomIntegerBytes 40
     let gx' = powerMod 2 x prime
+    -- smallest possible instance Tag
+    it <- ((0x100 .|.) . fromIntegral) `liftM` randomIntegerBytes 4
     return OtrState { ourPreviousKey = DHKeyPair gx  x
                     , ourCurrentKey  = DHKeyPair gx' x'
                     , ourKeyId = 2
+                    , ourIT = it
                     , theirPublicKey = Nothing
                     , theirCurrentKey = Nothing
                     , theirPreviousKey = Nothing
                     , theirKeyId = 0
+                    , theirIT = 0
                     , authState = AuthstateNone
                     , msgState = MsgstatePlaintext
                     }
@@ -141,7 +148,7 @@ protocolGuard :: MonadError OtrError m => ProtocolError -> Bool -> m ()
 protocolGuard e p = unless p . throwError $ ProtocolError e
 
 bob1
-  :: (Monad m, CRandom.CryptoRandomGen g) =>
+  :: (Monad m, CRandom.CPRG g) =>
      OtrT g m OtrDHCommitMessage
 bob1 = do
     r <- getBytes 16
@@ -161,9 +168,8 @@ alice1 otrcm = do
         AuthstateNone -> return ()
         _             -> OtrT $ throwError WrongState
     putAuthstate $ AuthstateAwaitingRevealsig otrcm
-    gy <- OtrT . gets $ pub .  ourPreviousKey
-    let gyMpi = Serialize.encode $ MPI gy
-    return $ DHK gyMpi
+    gy <- OtrT . gets $ pub . ourPreviousKey
+    return $ DHK (MPI gy)
 
 
 bob2 (DHK gyMpi) = do
@@ -174,7 +180,7 @@ bob2 (DHK gyMpi) = do
     checkAndSaveDHKey gyMpi
     sm <- mkAuthMessage
     putAuthstate $ AuthstateAwaitingSig
-    return $! (RSM (DATA r) sm)
+    return $! RSM (DATA r) sm
 
 -- alice2 :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
 --      OtrRevealSignatureMessage -> OtrT g m OtrSignatureMessage
@@ -185,7 +191,11 @@ alice2 (RSM r sm) = do
         _ -> throwError WrongState
     let gxMpi = aesCtr (unDATA r) (unDATA gxMpiAes) -- decrypt
     protocolGuard HashMismatch (SHA256.hash gxMpi == unDATA gxMpiSha256)
-    checkAndSaveDHKey gxMpi
+    gx <- case Serialize.decode gxMpi of
+        Right mpi@MPI{} -> return mpi
+        Left e -> throwError . ProtocolError .  DeserializationError $
+          "Could not decode gx MPI: " ++ show e
+    checkAndSaveDHKey gx
     checkAndSaveAuthMessage sm
     am <- mkAuthMessage
     putAuthstate $ AuthstateNone
@@ -202,16 +212,13 @@ bob3 (SM xaEncrypted xaSha256Mac) = do
     return ()
 
 -- checkAndSaveDHKey :: Monad m => BS.ByteString -> OtrT g m ()
-checkAndSaveDHKey :: Monad m => BS.ByteString -> OtrT g m ()
-checkAndSaveDHKey keyMpi = do
-    MPI key <- case Serialize.decode keyMpi of
-                   Left _e -> OtrT . throwError $ ProtocolError DeserializationError
-                   Right r -> return r
+checkAndSaveDHKey :: Monad m => MPI -> OtrT g m ()
+checkAndSaveDHKey (MPI key) = do
     protocolGuard KeyRange (2 <= key && key <= prime - 2)
     OtrT $ modify (\s -> s{theirCurrentKey = Just key})
 
 -- checkAndSaveAuthMessage :: Monad m => OtrSignatureMessage -> OtrT g m ()
-checkAndSaveAuthMessage (SM (DATA xEncrypted) (DATA xSha256Mac)) = do
+checkAndSaveAuthMessage (SM (DATA xEncrypted) (MAC xSha256Mac)) = do
     DHKeyPair gx x <- OtrT $ gets ourPreviousKey
     Just gy <- OtrT $ gets theirCurrentKey
     let s = powerMod gy x prime
@@ -247,14 +254,30 @@ mkAuthMessage = do
     let (xbEncrypted, xbSha256Mac) = xs ourPub keyId sig kdC kdM2
     return $ SM xbEncrypted xbSha256Mac
 
+bob :: CRandom.CPRG g => Otr g ()
+bob = do
+    sendMessage . DHCommitMessage =<< bob1
+    DHKeyMessage msg1 <- recvMessage
+    sendMessage . RevealSignatureMessage =<< bob2 msg1
+    SignatureMessage msg2 <- recvMessage
+    bob3 msg2
 
+-- alice :: CRandom.CPRG g => Otr g ()
+alice = do
+    DHCommitMessage msg1 <- recvMessage
+    sendMessage . DHKeyMessage =<< alice1 msg1
+    RevealSignatureMessage msg2 <- recvMessage
+    sendMessage . SignatureMessage =<< alice2 msg2
 
-
--- checkX xEncrypted xSha256 pubB = do
---     let xaSha256Mac' = HMAC.hmac' (HMAC.MacKey kdM2) xbEncrypted :: Crypto.SHA256
---     guard (encode xSha256Mac' == xSha245Mac)
---     let (Right (RSM (DsaP pubB) keyIdB (DsaS sigB))) =
---                 decode $ aesCtr aesKey xEncrypted
---     let mb = m gx gy pubB keyIdB kdM1
---     guard (DSA.verify sigB id pubB mb == Right True)
---     return () :: Maybe ()
+newSession :: (OtrMessage -> IO a)
+           -> IO OtrMessage
+           -> Otr CRandom.SystemRandom ()
+           -> (DSA.PublicKey, DSA.PrivateKey)
+           -> IO (Either OtrError (MVar (OtrState, CRandom.SystemRandom)))
+newSession sm rm side keys = do
+    g <- CRandom.getSystemRandomGen
+    let (st, g') = runRand g newState
+    res <- runMessaging sm rm $ runOtrT keys st side g
+    case res of
+        Left e -> return $ Left e
+        Right (((), st), g) -> Right <$> newMVar (st,g)

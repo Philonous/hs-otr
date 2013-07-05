@@ -24,6 +24,7 @@ library
                      , base64-bytestring
                      , arithmoi
 --                     , cryptocipher
+                     , crypto-random-api
                      , crypto-pubkey
                      , cryptohash
                      , cryptohash-cryptoapi
