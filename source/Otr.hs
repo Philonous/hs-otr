@@ -101,24 +101,6 @@ m ours theirs pubKey keyId messageAuthKey = Serialize.encode m''
                         ]
     m'' =  HMAC.hmac (HMAC.MacKey messageAuthKey) m' :: Crypto.SHA256
 
-xs :: DSA.PublicKey
-     -> OtrInt
-     -> DSA.Signature
-     -> BS.ByteString
-     -> BS.ByteString
-     -> (DATA, MAC)
-xs pub kid sig aesKey macKey = (DATA xEncrypted, MAC xSha256Mac)
-  where
-    x = Serialize.encode sd
-    sd = SD{ sdPub = DsaP pub
-           , sdKeyId = kid
-           , sdSig = DsaS sig
-           }
-    xEncrypted = aesCtr aesKey x
-    xEncryptedD = Serialize.encode $ DATA xEncrypted
-    xSha256Mac'= HMAC.hmac' (HMAC.MacKey macKey) xEncryptedD :: Crypto.SHA256
-    xSha256Mac = BS.take 20 $ Serialize.encode xSha256Mac'
-
 getPrevKeyMpi :: Monad m => OtrT g m BS.ByteString
 getPrevKeyMpi = (Serialize.encode . MPI . pub . ourPreviousKey) `liftM` OtrT get
 
@@ -177,7 +159,7 @@ bob2 (DHK gyMpi) = do
         AuthstateAwaitingDHKey r -> return r
         _ -> throwError WrongState
     checkAndSaveDHKey gyMpi
-    sm <- mkAuthMessage
+    sm <- mkAuthMessage KeysRSM
     putAuthstate $ AuthstateAwaitingSig
     return $! RSM (DATA r) sm
 
@@ -195,8 +177,8 @@ alice2 (RSM r sm) = do
         Left e -> throwError . ProtocolError .  DeserializationError $
           "Could not decode gx MPI: " ++ show e
     checkAndSaveDHKey gx
-    checkAndSaveAuthMessage sm
-    am <- mkAuthMessage
+    checkAndSaveAuthMessage KeysRSM sm
+    am <- mkAuthMessage KeysSM
     putAuthstate $ AuthstateNone
     return am
 
@@ -206,9 +188,12 @@ bob3 (SM xaEncrypted xaSha256Mac) = do
     case aState of
         AuthstateAwaitingSig -> return ()
         _ -> throwError $ WrongState
-    checkAndSaveAuthMessage (SM xaEncrypted xaSha256Mac)
+    checkAndSaveAuthMessage KeysSM (SM xaEncrypted xaSha256Mac)
     putAuthstate $ AuthstateNone
     return ()
+
+data AuthKeys = KeysRSM -- RevealSignatureMessage
+              | KeysSM  -- SignatureMessage
 
 -- checkAndSaveDHKey :: Monad m => BS.ByteString -> OtrT g m ()
 checkAndSaveDHKey :: Monad m => MPI -> OtrT g m ()
@@ -217,41 +202,65 @@ checkAndSaveDHKey (MPI key) = do
     OtrT $ modify (\s -> s{theirCurrentKey = Just key})
 
 -- checkAndSaveAuthMessage :: Monad m => OtrSignatureMessage -> OtrT g m ()
-checkAndSaveAuthMessage (SM (DATA xEncrypted) (MAC xSha256Mac)) = do
+checkAndSaveAuthMessage keyType (SM (DATA xEncrypted) (MAC xSha256Mac)) = do
     DHKeyPair gx x <- OtrT $ gets ourPreviousKey
     Just gy <- OtrT $ gets theirCurrentKey
     let s = powerMod gy x prime
-    let KD{..} = keyDerivs s
-    let xEncryptedD = Serialize.encode $ DATA xEncrypted
-    let xSha256Mac' = HMAC.hmac' (HMAC.MacKey kdM2) xEncryptedD :: Crypto.SHA256
-    protocolGuard MACFailure (BS.take 20 (Serialize.encode xSha256Mac') == xSha256Mac)
+        KD{..} = keyDerivs s
+        (macKey1, macKey2, aesKey)  = case keyType of
+            KeysRSM -> (kdM1 , kdM2 , kdC )
+            KeysSM  -> (kdM1', kdM2', kdC')
+        xEncryptedD = Serialize.encode $ DATA xEncrypted
+        xSha256Mac' = HMAC.hmac' (HMAC.MacKey macKey2) xEncryptedD :: Crypto.SHA256
+    protocolGuard MACFailure (BS.take 20 (Serialize.encode xSha256Mac') == xSha256Mac) -- TODO: reinstate
     let (Right (SD (DsaP theirPub) theirKeyId (DsaS sig))) =
-                Serialize.decode $ aesCtr kdC xEncrypted
-    let theirM = m gy gx theirPub theirKeyId kdM1
+                Serialize.decode $ aesCtr aesKey xEncrypted
+        theirM = m gy gx theirPub theirKeyId macKey1
     -- check that the public key they present is the one we have stored (if any)
     storedPubkey <- OtrT $ gets theirPublicKey
     case storedPubkey of
         Nothing -> return ()
         Just sp -> protocolGuard PubkeyMismatch (sp == theirPub)
-    protocolGuard SignatureMismatch
-                  (DSA.verify id  theirPub sig theirM == True)
+    protocolGuard SignatureMismatch $ DSA.verify id theirPub sig theirM
     OtrT . modify $ \s' -> s'{ theirKeyId = theirKeyId
-                           , theirPublicKey = Just theirPub
-                           }
+                             , theirPublicKey = Just theirPub
+                             }
 
 -- mkAuthMessage :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
 --      OtrT g m OtrSignatureMessage
-mkAuthMessage = do
+mkAuthMessage keyType = do
     DHKeyPair gx x <- ourPreviousKey <$> getState
     Just gy <- theirCurrentKey <$> getState
     let s = powerMod gy x prime
     let KD{..} = keyDerivs s
+    let (macKey1, macKey2, aesKey)  = case keyType of
+            KeysRSM -> (kdM1 , kdM2 , kdC )
+            KeysSM  -> (kdM1', kdM2', kdC')
     (ourPub, _) <- OtrT ask
     keyId <- OtrT $ gets ourKeyId
-    let mb = m gx gy ourPub keyId kdM1
+    let mb = m gx gy ourPub keyId macKey1
     sig <- sign mb
-    let (xbEncrypted, xbSha256Mac) = xs ourPub keyId sig kdC kdM2
+    let (xbEncrypted, xbSha256Mac) = xs ourPub keyId sig aesKey macKey2
     return $ SM xbEncrypted xbSha256Mac
+
+xs :: DSA.PublicKey
+     -> OtrInt
+     -> DSA.Signature
+     -> BS.ByteString
+     -> BS.ByteString
+     -> (DATA, MAC)
+xs pub kid sig aesKey macKey = (DATA xEncrypted, MAC xSha256Mac)
+  where
+    x = Serialize.encode sd
+    sd = SD{ sdPub = DsaP pub
+           , sdKeyId = kid
+           , sdSig = DsaS sig
+           }
+    xEncrypted = aesCtr aesKey x
+    xEncryptedD = Serialize.encode $ DATA xEncrypted
+    xSha256Mac'= HMAC.hmac' (HMAC.MacKey macKey) xEncryptedD :: Crypto.SHA256
+    xSha256Mac = BS.take 20 $ Serialize.encode xSha256Mac'
+
 
 bob :: CRandom.CPRG g => Otr g ()
 bob = do
