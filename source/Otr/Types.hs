@@ -239,12 +239,13 @@ instance Serialize DATA where
     get = DATA <$> (getBytes . fromIntegral =<< getWord32be)
 
 instance Serialize OtrDsaPubKey where
-    put (DsaP (DSA.PublicKey (DSA.Params p g q) y)) = putWord16be 0
-                   >> mapM_ (put . MPI) [p, q, g, y]
-                   >> return ()
+    put (DsaP (DSA.PublicKey (DSA.Params p g q) y)) = do
+        putWord16be 0
+        mapM_ (putMPI . MPI) [p, q, g, y]
+        return ()
     get = do
         guard . (== 0) =<< getWord16be
-        [p, q, g, y] <- replicateM 4 $ unMPI <$> get
+        [p, q, g, y] <- replicateM 4 $ unMPI <$> getMPI
         return (DsaP (DSA.PublicKey (DSA.Params p g q) y))
 
 putDsaS :: OtrDsaSignature -> PutM ()
