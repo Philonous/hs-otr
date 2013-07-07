@@ -10,7 +10,6 @@ import           Control.Concurrent
 import           Control.Monad
 import           Control.Monad.Trans
 import           Crypto.Types.PubKey.DSA
-import           Crypto.Types.PubKey.DSA
 import           Data.ASN1.BinaryEncoding
 import           Data.ASN1.Encoding
 import           Data.ASN1.Types
@@ -91,7 +90,7 @@ recv session = do
     decode = Serialize.decode . (\(Right x) -> x) . B64.decode . Text.encodeUtf8
               . fromJust . Text.stripPrefix otrPrefix . Text.init
 
-waitForOtr sess keys = forever $ do
+waitForOtr sess keys = do
     msg <- getMessage sess
     case getIM msg of
         Just (InstantMessage{imBody = MessageBody{bodyContent = bd}:_})
@@ -108,10 +107,10 @@ waitForOtr sess keys = forever $ do
 main = do
     updateGlobalLogger "Pontarius.Xmpp" $ setLevel DEBUG
     let keyFile = "../privkey.pem"
-    Right ((PEM pName _ bs) : _) <- pemParseBS `fmap` (BS.readFile keyFile)
+    Right ((PEM pName _ bs) : _) <- pemParseLBS `fmap` (BSL.readFile keyFile)
     let Right keysASN1 = decodeASN1 DER (BSL.fromChunks [bs])
     let Right (keyPair, _) = fromASN1 keysASN1
-
+    let (KeyPair params _ _) = keyPair
     Right sess <- session "species64739.dyndns.org"
              (Just ( \_ -> [scramSha1 "echo1" Nothing "pwd"]
                    , Just "bot"))
@@ -123,14 +122,14 @@ main = do
                 }
     thread1 <- forkIO $ autoAccept =<< dupSession sess
     sendPresence presenceOnline sess
---    thread1 <- forkIO $ autoMessage =<< dupSession sess
---    sendPresence (presenceSubscribe them) sess
-    sendMessage (simpleIM them "OTR!") sess
-    sendMessage (simpleIM them "?OTRv3?") sess
-    sendMessage (simpleIM them "OTR token sent.") sess
-    ns <- newSession (send sess) (recv sess) alice ( toPublicKey keyPair
-                                                   , toPrivateKey keyPair)
-    -- ns <- waitForOtr sess (toPublicKey keyPair, toPrivateKey keyPair)
+    let active = False
+    ns <- if active
+          then do
+              sendMessage (simpleIM them "?OTRv3?") sess
+              sendMessage (simpleIM them "OTR token sent.") sess
+              newSession (send sess) (recv sess) alice ( toPublicKey keyPair
+                                                       , toPrivateKey keyPair)
+          else waitForOtr sess (toPublicKey keyPair, toPrivateKey keyPair)
     case ns of
         Left e  -> print e
         Right r -> putStrLn "Success!"
