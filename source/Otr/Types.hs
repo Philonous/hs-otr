@@ -251,8 +251,10 @@ putDsaS :: OtrDsaSignature -> PutM ()
 putDsaS (DsaS (DSA.Signature r s)) = do
     let r' = unrollInteger r
     let s' = unrollInteger s
-    unless (length r' > 20 && length s' > 20)
-        $ fail "Signature components more than 20 bytes"
+    unless (length r' <= 20 && length s' <= 20)
+        . fail $ "Signature components more than 20 bytes"
+          ++ showHexData (BS.pack r') ++ " / " ++ showHexData (BS.pack s')
+          -- TODO: fail more -- gracefully
     replicateM (20 - length r') $ putWord8 0
     mapM_ putWord8 r'
     replicateM (20 - length s') $ putWord8 0
