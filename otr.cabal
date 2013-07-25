@@ -18,6 +18,7 @@ library
   exposed-modules:     Otr
   other-modules:       Otr.Monad
                      , Otr.Types
+                     , Otr.Serialize
   hs-source-dirs:      source
   build-depends:     base
                      , bytestring
@@ -40,4 +41,4 @@ library
                      , pem
                      , certificate
                      , monad-coroutine
-  ghc-options: -Wall
+  ghc-options: -Wall -fno-warn-orphans

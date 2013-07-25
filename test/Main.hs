@@ -122,7 +122,7 @@ main = do
                 }
     thread1 <- forkIO $ autoAccept =<< dupSession sess
     sendPresence presenceOnline sess
-    let active = False
+    let active = True
     ns <- if active
           then do
               sendMessage (simpleIM them "?OTRv3?") sess
@@ -132,6 +132,16 @@ main = do
           else waitForOtr sess (toPublicKey keyPair, toPrivateKey keyPair)
     case ns of
         Left e  -> print e
-        Right r -> putStrLn "Success!"
+        Right r -> do
+            putStrLn "Success!"
+            forever $ do
+                msg <- withSession r (send sess) (recv sess) recvDataMessage
+                print msg
+                withSession r (send sess) (recv sess) . sendDataMessage
+                    $ MP { messagePlaintext = "Hello encrypted"
+                         , tlvs = []
+                         }
+
+            return ()
 
     return sess

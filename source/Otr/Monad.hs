@@ -109,28 +109,21 @@ runMessaging sm rm m = go m
     go (SendMessage msg g) = sm msg >> go g
     go (RecvMessage f) = rm >>= \msg -> go (f msg)
 
-sendMessage :: OtrMessageBody -> Otr g ()
-sendMessage msgBody = do
-    tit <- OtrT $ gets theirIT
-    oit <- OtrT $ gets ourIT
-    lift $ SendMessage OM{ version = 3
-                         , senderITag = oit
-                         , receiverITag = tit
-                         , messageBody = msgBody
-                         } (return ())
+sendMessage :: OtrMessage -> Otr g ()
+sendMessage msg = lift $ SendMessage msg (return ())
 
-recvMessage :: Otr g OtrMessageBody
+recvMessage :: Otr g OtrMessage
 recvMessage = do
-    OM{..} <- lift $ RecvMessage return
+    msg@OM{messageHeader=MH{..}} <- lift $ RecvMessage return
     tit <- OtrT $ gets theirIT
     case tit of
         0 -> if senderITag > 0x100
              then do
                  OtrT $ modify( \s -> s{theirIT = senderITag} )
-                 return $ messageBody
+                 return msg
              else OtrT $ throwError InstanceTagRange
         n -> if senderITag == n
-             then return $ messageBody
+             then return msg
              else recvMessage -- When the instance tag doesn't match we just
                               -- ignore the message since it's not intended for
                               -- this session
