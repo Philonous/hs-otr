@@ -11,28 +11,26 @@ module Otr
   ) where
 import           Control.Applicative ((<$>))
 import           Control.Concurrent.MVar
+import qualified Control.Exception as Ex
 import           Control.Monad
 import           Control.Monad.Error
 import           Control.Monad.Reader
 import           Control.Monad.State.Strict
 import qualified Crypto.Cipher.AES as AES
-import qualified Crypto.Classes as Crypto
 import qualified Crypto.HMAC as HMAC
 import qualified Crypto.Hash.CryptoAPI as Crypto
-import qualified Crypto.Hash.SHA256 as SHA256 (hash)
 import qualified Crypto.Hash.SHA1 as SHA1 (hash)
-import qualified Crypto.Modes as Crypto (zeroIV)
+import qualified Crypto.Hash.SHA256 as SHA256 (hash)
 import qualified Crypto.PubKey.DSA as DSA
-import           Crypto.Util (constTimeEq)
 import qualified Crypto.Random.API as CRandom
+import           Crypto.Util (constTimeEq)
 import           Data.Bits hiding (shift)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BSL
 import qualified Data.Serialize as Serialize
-import qualified Data.Serialize.Put as Serialize
 import           Math.NumberTheory.Powers(powerMod)
-import qualified Control.Exception as Ex
 import qualified System.IO.Unsafe as Unsafe
+import Data.Word (Word8)
 
 import           Otr.Monad
 import           Otr.Types
@@ -66,7 +64,8 @@ makeDHKeyPair =  do
     let gx = powerMod 2 x prime
     return $ DHKeyPair gx x
 
-makeDHSharedSecret private public prime = powerMod public private prime
+makeDHSharedSecret :: Integer -> Integer -> Integer -> Integer
+makeDHSharedSecret private public p = powerMod public private p
 
 mapLeft :: (t -> a) -> Either t b -> Either a b
 mapLeft f (Left l) = Left $ f l
@@ -87,6 +86,7 @@ aesCtrZero = aesCtr zeroIV
   where
     zeroIV = AES.IV . BS.pack $ replicate 16 0
 
+sign  :: CRandom.CPRG g => BS.ByteString -> Otr g DSA.Signature
 sign !x = do
    (_, privKey) <- OtrT ask
    r <- OtrT . withRandGen $ \g -> DSA.sign g privKey id x
@@ -179,6 +179,7 @@ alice1 otrcm = do
     return $ DHK (MPI gy)
 
 
+bob2 :: (CRandom.CPRG g) => OtrDHKeyMessage -> Otr g OtrRevealSignatureMessage
 bob2 (DHK gyMpi) = do
     aState <- authState <$> getState
     r <- case aState of
@@ -189,8 +190,7 @@ bob2 (DHK gyMpi) = do
     putAuthState $ AuthStateAwaitingSig
     return $! RSM (DATA r) sm
 
--- alice2 :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
---      OtrRevealSignatureMessage -> OtrT g m OtrSignatureMessage
+alice2 :: CRandom.CPRG g => OtrRevealSignatureMessage -> Otr g OtrSignatureMessage
 alice2 (RSM r sm) = do
     aState <- authState <$> getState
     DHC{..} <- case aState of
@@ -209,7 +209,7 @@ alice2 (RSM r sm) = do
     putMsgState MsgStateEncrypted
     return am
 
--- bob3 :: Monad m => OtrSignatureMessage -> OtrT g m ()
+bob3 :: OtrSignatureMessage -> Otr g ()
 bob3 (SM xaEncrypted xaSha256Mac) = do
     aState <- OtrT $ gets authState
     case aState of
@@ -242,17 +242,18 @@ mkMessageHeader tp = do
 mkMessage :: OtrMessageBody -> Otr g OtrMessage
 mkMessage msgBody = do
     let tp = case msgBody of
-            DHCommitMessage b        -> 0x02
-            DHKeyMessage b           -> 0x0a
-            RevealSignatureMessage b -> 0x11
-            SignatureMessage b       -> 0x12
-            DataMessage b            -> 0x03
+            DHCommitMessage _        -> 0x02
+            DHKeyMessage _           -> 0x0a
+            RevealSignatureMessage _ -> 0x11
+            SignatureMessage _       -> 0x12
+            DataMessage _            -> 0x03
     mh <- mkMessageHeader tp
     return OM { messageHeader = mh
               , messageBody = msgBody
               }
 
 
+checkAndSaveAuthMessage :: AuthKeys -> OtrSignatureMessage -> Otr g ()
 checkAndSaveAuthMessage keyType (SM (DATA xEncrypted) (MAC xSha256Mac)) = do
     DHKeyPair gx x <- OtrT $ gets ourCurrentKey
     Just gy <- OtrT $ gets theirCurrentKey
@@ -277,8 +278,7 @@ checkAndSaveAuthMessage keyType (SM (DATA xEncrypted) (MAC xSha256Mac)) = do
                              , theirPublicKey = Just theirPub
                              }
 
--- mkAuthMessage :: (Monad m, Functor m, CRandom.CryptoRandomGen g) =>
---      OtrT g m OtrSignatureMessage
+mkAuthMessage :: CRandom.CPRG g => AuthKeys -> Otr g OtrSignatureMessage
 mkAuthMessage keyType = do
     DHKeyPair gx x <- ourCurrentKey <$> getState
     Just gy <- theirCurrentKey <$> getState
@@ -321,7 +321,7 @@ bob = do
     SignatureMessage msg2 <- messageBody <$> recvMessage
     bob3 msg2
 
--- alice :: CRandom.CPRG g => Otr g ()
+alice :: CRandom.CPRG g => Otr g ()
 alice = do
     DHCommitMessage msg1 <- messageBody <$> recvMessage
     sendMessage =<< mkMessage . DHKeyMessage =<< alice1 msg1
@@ -335,14 +335,14 @@ newSession :: (OtrMessage -> IO a)
            -> Otr CRandom.SystemRandom ()
            -> DSAKeys
            -> IO (Either OtrError
-                  (DSAKeys, (MVar (OtrState, CRandom.SystemRandom))))
+                  (DSAKeys, MVar (OtrState, CRandom.SystemRandom)))
 newSession sm rm side keys = do
     g <- CRandom.getSystemRandomGen
     let (st, g') = runRand g newState
-    res <- runMessaging sm rm $ runOtrT keys st side g
+    res <- runMessaging sm rm $ runOtrT keys st side g'
     case res of
         Left e -> return $ Left e
-        Right (((), st), g) -> Right . (,) keys  <$> newMVar (st,g)
+        Right (((), st'), g'') -> Right . (,) keys  <$> newMVar (st',g'')
 
 withSession
   :: ((DSA.PublicKey, DSA.PrivateKey), MVar (OtrState, g))
@@ -356,10 +356,11 @@ withSession (keys, s) sm rm f = do
         res <- runMessaging sm rm $ runOtrT keys st f g
         case res of
             Left e -> return $ Left e
-            Right ((a, st), g) -> do
-                putMVar s (st, g)
+            Right ((a, st'), g') -> do
+                putMVar s (st', g')
                 return $ Right a
 
+makeMessageKeys :: OtrInt -> OtrInt -> Otr g MessageKeys
 makeMessageKeys tKeyID oKeyID = do
     OtrState{..} <- OtrT get
     tck <- case ( tKeyID == theirKeyID - 1
@@ -382,18 +383,16 @@ makeMessageKeys tKeyID oKeyID = do
     let sharedSecret = makeDHSharedSecret (priv ok) tck prime
         secBytes = Serialize.runPut . putMPI $ MPI sharedSecret
         (sendByte, recvByte) = if tck <= pub ok
-                               then (0x01, 0x02)
+                               then (0x01, 0x02) :: (Word8, Word8)
                                else (0x02, 0x01)
-        h1 b = (Unsafe.unsafePerformIO $ do
-                     putStr "$$$"
-                     print secBytes) `seq`
-               SHA1.hash (BS.singleton b `BS.append` secBytes)
+        h1 b = SHA1.hash (BS.singleton b `BS.append` secBytes)
         sendAES = BS.take 16 $ h1 sendByte
         sendMAC = SHA1.hash sendAES
         recvAES = BS.take 16 $ h1 recvByte
         recvMAC = SHA1.hash recvAES
     return MK{..}
 
+sendDataMessage :: OtrMessagePayload -> Otr g ()
 sendDataMessage payload = do
     OtrState{..} <- OtrT get
     mh <- mkMessageHeader 0x03
@@ -420,13 +419,14 @@ sendDataMessage payload = do
     OtrT $ modify (\s -> s{counter = counter + 1})
     sendMessage =<< mkMessage outMsg
 
+recvDataMessage :: CRandom.CPRG g => Otr g (Either String OtrMessagePayload)
 recvDataMessage = do
     OtrState{..} <- OtrT get
     unless (msgState == MsgStateEncrypted) $ throwError WrongState
     msg' <- recvMessage
     case messageBody msg' of
         DataMessage msg@DM{rawDataMessage = rdm@RDM{..}} -> do
-            mk@MK{..} <- makeMessageKeys senderKeyID recipientKeyID
+            MK{..} <- makeMessageKeys senderKeyID recipientKeyID
             -- recreate the part of the message until the beginning of the MAC
             let msgBytes = Serialize.runPut $ do
                     putMessageHeader $ messageHeader msg'

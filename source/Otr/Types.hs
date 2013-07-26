@@ -3,8 +3,8 @@
 {-# LANGUAGE NamedFieldPuns #-}
 module Otr.Types where
 
-import qualified Control.Monad.CryptoRandom as CR
 import           Control.Exception
+import qualified Control.Monad.CryptoRandom as CR
 import           Control.Monad.Error
 import qualified Crypto.PubKey.DSA as DSA
 import           Crypto.Util (constTimeEq)
