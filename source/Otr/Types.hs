@@ -7,6 +7,7 @@ import qualified Control.Monad.CryptoRandom as CR
 import           Control.Exception
 import           Control.Monad.Error
 import qualified Crypto.PubKey.DSA as DSA
+import           Crypto.Util (constTimeEq)
 import qualified Data.ByteString as BS
 import           Data.Typeable
 import           Data.Word
@@ -193,7 +194,10 @@ data AuthState = AuthStateNone
 --               | AuthStateV1Setup  -- Compat with V1
                  deriving Show
 
-newtype MAC = MAC BS.ByteString deriving (Eq, Show) -- 20 bytes of MAC data
+newtype MAC = MAC BS.ByteString deriving (Show) -- 20 bytes of MAC data
+
+instance Eq MAC where
+    (MAC a) == (MAC b) = constTimeEq a b
 
 data OtrSignatureMessage = SM { encryptedSignature :: !DATA
                               , macdSignature :: !MAC

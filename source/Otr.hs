@@ -23,6 +23,7 @@ import qualified Crypto.Hash.SHA256 as SHA256 (hash)
 import qualified Crypto.Hash.SHA1 as SHA1 (hash)
 import qualified Crypto.Modes as Crypto (zeroIV)
 import qualified Crypto.PubKey.DSA as DSA
+import           Crypto.Util (constTimeEq)
 import qualified Crypto.Random.API as CRandom
 import           Data.Bits hiding (shift)
 import qualified Data.ByteString as BS
@@ -36,6 +37,9 @@ import qualified System.IO.Unsafe as Unsafe
 import           Otr.Monad
 import           Otr.Types
 import           Otr.Serialize
+
+(=~=) :: BS.ByteString -> BS.ByteString -> Bool
+(=~=) = constTimeEq
 
 getState :: Monad m => OtrT g m OtrState
 getState = OtrT . lift $ get
@@ -193,7 +197,7 @@ alice2 (RSM r sm) = do
         AuthStateAwaitingRevealsig dhc -> return dhc
         _ -> throwError WrongState
     let gxMpi = aesCtrZero (unDATA r) (unDATA gxMpiAes) -- decrypt
-    protocolGuard HashMismatch (SHA256.hash gxMpi == unDATA gxMpiSha256)
+    protocolGuard HashMismatch (SHA256.hash gxMpi =~= unDATA gxMpiSha256)
     gx <- case Serialize.decode gxMpi of
         Right mpi@MPI{} -> return mpi
         Left e -> throwError . ProtocolError .  DeserializationError $
@@ -259,7 +263,7 @@ checkAndSaveAuthMessage keyType (SM (DATA xEncrypted) (MAC xSha256Mac)) = do
             KeysSM  -> (kdM1', kdM2', kdC')
         xEncryptedD = Serialize.encode $ DATA xEncrypted
         xSha256Mac' = HMAC.hmac' (HMAC.MacKey macKey2) xEncryptedD :: Crypto.SHA256
-    protocolGuard MACFailure (BS.take 20 (Serialize.encode xSha256Mac') == xSha256Mac)
+    protocolGuard MACFailure (BS.take 20 (Serialize.encode xSha256Mac') =~= xSha256Mac)
     let (Right (SD (DsaP theirPub) theirKeyID (DsaS sig))) =
                 Serialize.decode $ aesCtrZero aesKey xEncrypted
         theirM = m gy gx theirPub theirKeyID macKey1
@@ -430,6 +434,8 @@ recvDataMessage = do
                 mMAC' = HMAC.hmac' (HMAC.MacKey recvMAC) msgBytes :: Crypto.SHA1
                 mMAC = MAC $ Serialize.encode mMAC'
             -- TODO: register recvMac
+
+            -- MAC Eq instance is constant time
             protocolGuard MACFailure (mMAC == messageMAC msg)
             case () of () | recipientKeyID == ourKeyID    -> return ()
                           | recipientKeyID == ourKeyID +1 -> shiftKeys
