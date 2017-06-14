@@ -1,6 +1,9 @@
 hs-otr
 ======
 
+Please do __not__ use this code. I am __not__ a cryptographer or security expert. It's probably __FULL OF SECURITY HOLES.__ You have been warned.
+======
+
 Create a signing key
 --------------------
 
